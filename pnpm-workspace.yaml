@@ -1,7 +1,6 @@
 packages:
-  - artifacts/api-server
-  - lib/api-zod
-  - lib/db
+  - "artifacts/*"
+  - "lib/*"
 
 catalog:
   drizzle-orm: ^0.45.1
