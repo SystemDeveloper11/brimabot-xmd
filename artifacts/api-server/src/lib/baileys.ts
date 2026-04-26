@@ -4,18 +4,12 @@ import makeWASocket, {
   DisconnectReason,
   makeCacheableSignalKeyStore,
 } from "@whiskeysockets/baileys";
-import { handleMessage } from "./commands.js";
+import handleMessage from "./commands.js";
 import fs from "fs";
 import path from "path";
 import zlib from "zlib";
 import { logger } from "./logger.js";
-import {
-  AUTH_DIR,
-  ensureAuthDir,
-  loadSettings,
-  saveSessionMeta,
-  deleteSessionMeta,
-} from "./botState.js";
+import { AUTH_DIR, ensureAuthDir, loadSettings, saveSessionMeta, deleteSessionMeta } from "./botState.js";
 
 type WASocket = ReturnType<typeof makeWASocket>;
 
