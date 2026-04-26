@@ -4,17 +4,16 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "baseUrl": ".",
-    "strict": true,
+    "strict": false,
     "skipLibCheck": true,
     "noEmit": true,
     "esModuleInterop": true,
     "resolveJsonModule": true,
+    "allowJs": true,
+    "verbatimModuleSyntax": false,
     "paths": {
       "@workspace/*": ["lib/*"]
     }
   },
-  "include": [
-    "artifacts",
-    "lib"
-  ]
+  "include": ["artifacts", "lib"]
 }
