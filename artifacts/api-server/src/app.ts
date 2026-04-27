@@ -1,9 +1,12 @@
 import express, { type Express, type Request, type Response } from "express";
 import cors from "cors";
-import * as pinoHttp from "pino-http";
+import pinoHttpPkg from "pino-http";
 import router from "./routes.js";
 import logger from "./lib/logger.js";
 import { PAIR_PAGE_HTML } from "./lib/pairPage.js";
+
+// FIX: pino-http ESM/CJS compatibility
+const pinoHttp = (pinoHttpPkg as any).default ?? pinoHttpPkg;
 
 const app: Express = express();
 
@@ -19,10 +22,12 @@ app.use(
         };
       },
       res(res: Response) {
-        return { statusCode: res.statusCode };
+        return {
+          statusCode: res.statusCode,
+        };
       },
     },
-  }) as any
+  })
 );
 
 app.use(cors());

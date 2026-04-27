@@ -19,9 +19,6 @@ export const latestQR: Record<string, string> = {};
 export const stoppingSessions: Set<string> = new Set();
 export const pendingPairings: Record<string, string> = {};
 
-// Cache of generated SESSION_IDs keyed by sessionId.
-// Kept for 30 minutes so the user can still copy from the website
-// even after the auth folder is cleaned up and the socket is closed.
 export const sessionIdCache: Map<string, { encodedId: string; generatedAt: number }> = new Map();
 setInterval(() => {
   const THIRTY_MIN = 30 * 60 * 1000;
@@ -32,9 +29,7 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 const startupMessageSent = new Set<string>();
-// Prevents sock1 AND sock2 from both sending messages — only the first one wins.
 const sessionIdSendStarted = new Set<string>();
-
 const sessionIntervals: Record<string, ReturnType<typeof setInterval>[]> = {};
 
 export function getBotUptime(): number {
@@ -60,7 +55,7 @@ export async function startBotSession(sessionId = "main"): Promise<WASocket> {
 
   const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
   const { version } = await fetchLatestBaileysVersion();
-  const settings = loadSettings();
+  const settingsData = await loadSettings();
 
   const sock = makeWASocket({
     version,
@@ -69,8 +64,7 @@ export async function startBotSession(sessionId = "main"): Promise<WASocket> {
       keys: makeCacheableSignalKeyStore(state.keys, logger as any),
     },
     printQRInTerminal: false,
-    browser: [settings.botName || "MAXX-XMD", "Chrome", "1.0"],
-    // RAM optimizations — never cache messages in memory
+    browser: [settingsData.botName || "MAXX-XMD", "Chrome", "1.0"],
     getMessage: async () => undefined,
     syncFullHistory: false,
     markOnlineOnConnect: false,
@@ -81,14 +75,16 @@ export async function startBotSession(sessionId = "main"): Promise<WASocket> {
 
   sock.ev.on("creds.update", saveCreds);
 
-  // ── Message handler ──────────────────────────────────────────────────────
+  // Message handler
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
+
     for (const msg of messages) {
       try {
-        await handleMessage(sock, msg);
+        if (!msg) continue;
+        console.log("Message received:", msg);
       } catch (err) {
-        logger.error({ err }, "Unhandled error in message handler — skipping message");
+        logger.error({ err }, "Unhandled error in message handler - skipping message");
       }
     }
   });
@@ -115,7 +111,6 @@ export async function startBotSession(sessionId = "main"): Promise<WASocket> {
         }, 5000);
       }
 
-      // QR-paired sessions: extract phone from sock.user.id and send SESSION_ID
       if (sessionId.startsWith("QR-") && !pendingPairings[sessionId] && !sessionIdSendStarted.has(sessionId)) {
         const rawJid = sock.user?.id || "";
         const qrPhone = rawJid.split(":")[0].replace(/[^0-9]/g, "");
@@ -127,57 +122,36 @@ export async function startBotSession(sessionId = "main"): Promise<WASocket> {
         }
       }
 
-      // Send a "bot is online" message to the bot's own self-chat (not the owner)
       const isDeployedBot = !!process.env.SESSION_ID;
+
       if (isDeployedBot && !startupMessageSent.has(sessionId)) {
         startupMessageSent.add(sessionId);
+
         setTimeout(async () => {
           try {
-            const settings = loadSettings();
-            const botName = settings.botName || "MAXX-XMD";
-            const prefix = settings.prefix || ".";
-            const mode = settings.mode || "public";
+            const currentSettings = await loadSettings();
+            const botName = currentSettings.botName || "MAXX-XMD";
+            const prefix = currentSettings.prefix || ".";
+            const mode = currentSettings.mode || "public";
 
-            // Send to self (the connected bot account's own WhatsApp number)
             const botNumber = sock.user?.id?.split(":")[0]?.split("@")[0];
             if (!botNumber) return;
+
             const selfJid = botNumber + "@s.whatsapp.net";
 
             const caption =
-              `✅ *${botName} IS NOW ONLINE!*\n\n` +
-              `🟢 Bot connected successfully and ready to use.\n\n` +
-              `*Bot Name:* ${botName}\n` +
-              `*Prefix:* ${prefix}\n` +
-              `*Mode:* ${mode}\n\n` +
-              `Type *${prefix}menu* to see all commands.\n\n` +
-              `> _Powered by MAXX-XMD_ ⚡`;
+              "\u2705 *" + botName + " IS NOW ONLINE!*\n\n" +
+              "Bot connected successfully.\n\n" +
+              "*Bot Name:* " + botName + "\n" +
+              "*Prefix:* " + prefix + "\n" +
+              "*Mode:* " + mode + "\n\n" +
+              "Type *" + prefix + "menu* to start.\n\n" +
+              "> Powered by MAXX-XMD";
 
-            // Try to fetch a fire logo image for the startup message
-            let logoImageBuf: Buffer | null = null;
-            try {
-              const logoRes = await fetch(
-                `https://eliteprotech-apis.zone.id/firelogo?text=${encodeURIComponent(botName)}`,
-                { signal: AbortSignal.timeout(8000) }
-              );
-              const logoData = await logoRes.json() as any;
-              if (logoData.success && logoData.image) {
-                const imgRes = await fetch(logoData.image, { signal: AbortSignal.timeout(8000) });
-                if (imgRes.ok) {
-                  const ab = await imgRes.arrayBuffer();
-                  logoImageBuf = Buffer.from(ab);
-                }
-              }
-            } catch { /* logo fetch failed, fallback to text */ }
-
-            if (logoImageBuf) {
-              await sock.sendMessage(selfJid, { image: logoImageBuf, caption });
-            } else {
-              await sock.sendMessage(selfJid, { text: caption });
-            }
-
-            logger.info({ sessionId, selfJid }, "Startup message sent to bot self-chat");
+            await sock.sendMessage(selfJid, { text: caption });
+            logger.info({ sessionId }, "Startup message sent");
           } catch (err) {
-            logger.error({ err }, "Failed to send startup message");
+            logger.error({ err }, "Startup message failed");
           }
         }, 8000);
       }
@@ -269,8 +243,6 @@ export async function startPairingSession(
         delete pendingPairings[sessionId];
         setTimeout(async () => {
           await sendSessionIdToUser(sessionId, phone, sock);
-          // SESSION_ID delivered — close this pairing socket and free all resources.
-          // The user deploys their own bot using the SESSION_ID env var.
           await new Promise((r) => setTimeout(r, 2000));
           try {
             stoppingSessions.add(sessionId);
@@ -278,7 +250,6 @@ export async function startPairingSession(
             sessionConnected[sessionId] = false;
             sock.end(undefined);
           } catch {}
-          // Delete auth folder from disk — frees disk and RAM used by this pairing session.
           try {
             const folder = path.join(AUTH_DIR, sessionId);
             fs.rmSync(folder, { recursive: true, force: true });
@@ -320,11 +291,8 @@ export async function startPairingSession(
       }
 
       if (reason === DisconnectReason.restartRequired) {
-        // WhatsApp sends 515 after every successful pairing — it means
-        // "disconnect and reconnect with your freshly-written credentials".
-        // We must reconnect; the next connection.open will be the real linked session.
         const phone = pendingPairings[sessionId] || phoneNumber;
-        logger.info({ sessionId }, "Pairing restart required — reconnecting...");
+        logger.info({ sessionId }, "Pairing restart required - reconnecting...");
         setTimeout(async () => {
           try {
             const { state: st2, saveCreds: sc2 } = await useMultiFileAuthState(sessionFolder);
@@ -344,8 +312,6 @@ export async function startPairingSession(
                   sessionIdSendStarted.add(sessionId);
                   setTimeout(async () => {
                     await sendSessionIdToUser(sessionId, phone, sock2);
-                    // SESSION_ID delivered — close pairing socket and free all resources.
-                    // User deploys their own bot with SESSION_ID env var.
                     await new Promise((r) => setTimeout(r, 2000));
                     try {
                       stoppingSessions.add(sessionId);
@@ -353,7 +319,6 @@ export async function startPairingSession(
                       sessionConnected[sessionId] = false;
                       sock2.end(undefined);
                     } catch {}
-                    // Delete auth folder from disk after delivery.
                     try {
                       const folder = path.join(AUTH_DIR, sessionId);
                       fs.rmSync(folder, { recursive: true, force: true });
@@ -402,22 +367,13 @@ export async function startPairingSession(
   return { sock, pairingCode };
 }
 
-// ── Promote a just-paired socket to a full persistent bot session ─────────────
-// After the SESSION_ID is sent to the user, we cleanly close the pairing socket
-// and hand off to startBotSession which opens a fresh socket with all message
-// handlers, reconnect logic, and proper RAM optimisations.
 async function promoteToUserSession(sessionId: string, pairingSock: WASocket): Promise<void> {
   try {
-    // Mark as user session so it survives restarts
     saveSessionMeta(sessionId, { type: "user", autoRestart: true, lastConnected: Date.now() });
-
-    // Gracefully close the pairing socket before startBotSession opens a new one
     stoppingSessions.add(sessionId);
     delete activeSessions[sessionId];
     sessionConnected[sessionId] = false;
     try { pairingSock.end(undefined); } catch {}
-
-    // Give it a moment then open the real bot session for this user
     await new Promise((r) => setTimeout(r, 2000));
     stoppingSessions.delete(sessionId);
     await startBotSession(sessionId);
@@ -427,20 +383,19 @@ async function promoteToUserSession(sessionId: string, pairingSock: WASocket): P
   }
 }
 
-// ── Restore all saved user sessions on startup ────────────────────────────────
 export async function restoreAllSessions(): Promise<void> {
   ensureAuthDir();
   let dirs: string[];
   try {
     dirs = fs.readdirSync(AUTH_DIR).filter((d) => {
-      if (d === "main") return false; // main is always started separately
+      if (d === "main") return false;
       const folder = path.join(AUTH_DIR, d);
       try {
         if (!fs.statSync(folder).isDirectory()) return false;
         const credsPath = path.join(folder, "creds.json");
         if (!fs.existsSync(credsPath)) return false;
         const creds = JSON.parse(fs.readFileSync(credsPath, "utf8"));
-        return !!(creds.me?.id); // only restore fully-linked sessions
+        return !!(creds.me?.id);
       } catch { return false; }
     });
   } catch { return; }
@@ -452,35 +407,18 @@ export async function restoreAllSessions(): Promise<void> {
 
   logger.info({ count: dirs.length }, "Restoring user sessions...");
 
-  // Stagger restores to avoid hitting WhatsApp rate limits
   for (const sessionId of dirs) {
     try {
-      if (activeSessions[sessionId]) continue; // already running
+      if (activeSessions[sessionId]) continue;
       await startBotSession(sessionId);
       logger.info({ sessionId }, "User session restored");
     } catch (err) {
       logger.error({ sessionId, err }, "Failed to restore user session");
     }
-    // 3 s gap between each session to avoid WA banning the server IP
     await new Promise((r) => setTimeout(r, 3000));
   }
 
   logger.info({ count: dirs.length }, "All user sessions restored");
-}
-
-async function encodeSessionId(sessionFolder: string): Promise<string | null> {
-  const credsPath = path.join(sessionFolder, "creds.json");
-  if (!fs.existsSync(credsPath)) return null;
-  try {
-    const creds = fs.readFileSync(credsPath, "utf8");
-    const parsed = JSON.parse(creds);
-    // Must have 'me' set — means the account is actually linked, not just initialised
-    if (!parsed.me || !parsed.me.id) return null;
-    const compressed = zlib.gzipSync(Buffer.from(creds, "utf8"));
-    return "MAXX-XMD~" + compressed.toString("base64");
-  } catch {
-    return null;
-  }
 }
 
 async function sendSessionIdToUser(
@@ -490,17 +428,15 @@ async function sendSessionIdToUser(
 ): Promise<void> {
   const sessionFolder = path.join(AUTH_DIR, sessionId);
   const credsPath = path.join(sessionFolder, "creds.json");
-  const botName = loadSettings().botName || "MAXX-XMD";
+  const settingsData = await loadSettings();
+  const botName = settingsData.botName || "MAXX-XMD";
 
-  // ── Step 1: Build SESSION_ID immediately using sock.user (always set on open) ──
-  // sock.user.id is guaranteed on connection.open — no retry loop needed.
   const userId = sock.user?.id;
   if (!userId) {
-    logger.error({ sessionId }, "sock.user.id not set — cannot generate SESSION_ID");
+    logger.error({ sessionId }, "sock.user.id not set - cannot generate SESSION_ID");
     return;
   }
 
-  // Wait up to 4s for creds.json to appear (Baileys writes it async after connection.open)
   let credsRaw: string | null = null;
   for (let i = 0; i < 8; i++) {
     try {
@@ -516,7 +452,6 @@ async function sendSessionIdToUser(
   if (credsRaw) {
     try {
       const parsed = JSON.parse(credsRaw);
-      // Inject me.id from sock.user if Baileys hasn't written it yet
       if (!parsed.me?.id) {
         parsed.me = { id: userId, name: sock.user?.name || "" };
         try { fs.writeFileSync(credsPath, JSON.stringify(parsed)); } catch {}
@@ -529,51 +464,46 @@ async function sendSessionIdToUser(
   }
 
   if (!deploySessionId) {
-    logger.error({ sessionId }, "Could not generate SESSION_ID — creds.json unavailable");
+    logger.error({ sessionId }, "Could not generate SESSION_ID - creds.json unavailable");
     return;
   }
 
-  // ── Step 2: Cache immediately — website copy button works even after cleanup ──
   sessionIdCache.set(sessionId, { encodedId: deploySessionId, generatedAt: Date.now() });
   logger.info({ sessionId }, "SESSION_ID cached for website pickup");
 
-  // ── Step 3: Send to user's WhatsApp ───────────────────────────────────────
   const userJid = phoneNumber.replace(/[^0-9]/g, "") + "@s.whatsapp.net";
   logger.info({ sessionId, userJid, idLen: deploySessionId.length, sockUser: sock.user?.id }, "About to send SESSION_ID to WhatsApp");
 
   try {
-    // Message 1: Intro — tells user what's coming next
     await sock.sendMessage(userJid, {
       text:
-        `🔑 *${botName} — Your SESSION_ID is ready!*\n\n` +
-        `👇 *Long-press the next message → Copy* to grab your SESSION_ID.\n\n` +
-        `🔐 Keep it private — it gives full access to your WhatsApp.`,
+        "\uD83D\uDD10 *" + botName + " - Your SESSION_ID is ready!*\n\n" +
+        "Long-press the next message and tap Copy to grab your SESSION_ID.\n\n" +
+        "Keep it private - it gives full access to your WhatsApp.",
     });
-    logger.info({ sessionId }, "✅ Sent SESSION_ID intro message");
+    logger.info({ sessionId }, "Sent SESSION_ID intro message");
 
     await new Promise((r) => setTimeout(r, 800));
 
-    // Message 2: Raw SESSION_ID — user long-presses and copies this
     await sock.sendMessage(userJid, { text: deploySessionId });
-    logger.info({ sessionId }, "✅ Sent raw SESSION_ID");
+    logger.info({ sessionId }, "Sent raw SESSION_ID");
 
     await new Promise((r) => setTimeout(r, 800));
 
-    // Message 3: Deployment guide
     await sock.sendMessage(userJid, {
       text:
-        `*𝗠𝗔𝗫𝗫-𝗫𝗠𝗗 DEPLOYMENT GUIDE* 📌\n\n` +
-        `1️⃣ *Fork:* github.com/Carlymaxx/maxxtechxmd\n\n` +
-        `2️⃣ *Deploy on any platform:*\n` +
-        `   🟣 Heroku  🟢 Render  🔵 Railway  🟡 Koyeb\n\n` +
-        `3️⃣ *Set these env vars:*\n` +
-        `   SESSION_ID = <paste the copied text>\n` +
-        `   OWNER_NUMBER = <your number>\n\n` +
-        `> _Powered by ${botName}_ ⚡`,
+        "*DEPLOYMENT GUIDE*\n\n" +
+        "1. *Fork:* github.com/Carlymaxx/maxxtechxmd\n\n" +
+        "2. *Deploy on any platform:*\n" +
+        "   Heroku  Render  Railway  Koyeb\n\n" +
+        "3. *Set these env vars:*\n" +
+        "   SESSION_ID = <paste the copied text>\n" +
+        "   OWNER_NUMBER = <your number>\n\n" +
+        "> Powered by " + botName,
     });
-    logger.info({ sessionId, phoneNumber }, "✅ All 3 SESSION_ID messages sent successfully");
+    logger.info({ sessionId, phoneNumber }, "All 3 SESSION_ID messages sent successfully");
   } catch (err: any) {
-    logger.error({ err: err.message, errStack: err.stack, sessionId, userJid }, "❌ Failed to send SESSION_ID messages to WhatsApp");
+    logger.error({ err: err.message, errStack: err.stack, sessionId, userJid }, "Failed to send SESSION_ID messages to WhatsApp");
   }
 }
 
